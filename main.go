@@ -134,7 +134,13 @@ func main() {
 	for _, ws := range workspaces.Items {
 		if len(ws.Spec.Placement.Clusters) > 0 {
 			for _, i := range ws.Spec.Placement.Clusters {
-				message := synchronizer.GetQuota(ws.Name, i.Name)
+				if i.Name == "" {
+					continue
+				}
+				message, err := synchronizer.GetQuota(ws.Name, i.Name)
+				if err != nil {
+					continue
+				}
 				//messageBytes, _ := json.Marshal(info)
 				synchronizer.SendMessage(message)
 			}
@@ -180,12 +186,12 @@ func (s *Synchronizer) Init(p Arg) {
 
 	// 处理结果
 	if err != nil {
-		log.Printf("请求失败: %v", err)
+		log.Printf("请求失败: [%v] %v", err, url)
 		return
 	}
 
 	if statusCode != 200 {
-		log.Printf("响应异常，错误码: %v", statusCode)
+		log.Printf("响应异常，错误码: [%v] %v", statusCode, url)
 		return
 	}
 
@@ -241,12 +247,12 @@ func (s *Synchronizer) GetWorkspaceInfo() (v1alpha2.WorkspaceTemplateList, error
 
 	// 处理结果
 	if err != nil {
-		log.Printf("请求失败: %v", err)
+		log.Printf("请求失败: [%v] %v", err, url)
 		return *workspaces, err
 	}
 
 	if statusCode != 200 {
-		log.Printf("响应异常，错误码: %v", statusCode)
+		log.Printf("响应异常，错误码: [%v] %v", statusCode, url)
 		return *workspaces, err
 	}
 
@@ -254,14 +260,12 @@ func (s *Synchronizer) GetWorkspaceInfo() (v1alpha2.WorkspaceTemplateList, error
 
 	err = json.Unmarshal([]byte(body), &workspaces)
 	if err != nil {
-		panic(err)
+		log.Println(err)
 	}
-
 	return *workspaces, nil
-	//fmt.Println(workspaces)
 }
 
-func (s *Synchronizer) GetQuota(workspace string, cluster string) map[string]interface{} {
+func (s *Synchronizer) GetQuota(workspace string, cluster string) (map[string]interface{}, error) {
 
 	parts := []string{
 		s.Host,
@@ -301,29 +305,36 @@ func (s *Synchronizer) GetQuota(workspace string, cluster string) map[string]int
 
 	// 处理结果
 	if err != nil {
-		log.Printf("请求失败: %v", err)
-		data = map[string]interface{}{
-			"请求失败": err,
-		}
+		log.Printf("请求失败: [%v] %v", err, url)
+		return data, err
 	}
 
 	if statusCode != 200 {
-		log.Printf("请求失败,错误码: %v", statusCode)
-		data = map[string]interface{}{
-			"响应异常，错误码": err,
-		}
+		log.Printf("请求失败,错误码: [%v] %v", statusCode, url)
+		return data, err
 	}
 
 	quota := &quotav1alpha2.ResourceQuota{}
 	err = json.Unmarshal([]byte(string(body)), &quota)
 	if err != nil {
-		panic(err)
+		log.Fatalln(err, quota)
+		return data, err
 	}
 
 	resouces := make(map[string]map[string]string)
 
 	//fmt.Println(quota)
-	if reflect.ValueOf(quota.Status.Total).IsZero() {
+	switch {
+	case reflect.ValueOf(quota.Spec.Quota.Hard).IsZero():
+		resouces["hard"] = map[string]string{
+			"requests.cpu":    "0",
+			"limits.cpu":      "0",
+			"requests.memory": "0",
+			"limits.memory":   "0",
+			"huawei-fusionstorage.storageclass.storage.k8s.io/requests.storage": "0",
+		}
+		resouces["used"] = resouces["hard"]
+	case reflect.ValueOf(quota.Status.Total).IsZero():
 		resouces["hard"] = ConvertToMapString(quota.Spec.Quota.Hard)
 		resouces["used"] = map[string]string{
 			"requests.cpu":    "0",
@@ -332,9 +343,10 @@ func (s *Synchronizer) GetQuota(workspace string, cluster string) map[string]int
 			"limits.memory":   "0",
 			"huawei-fusionstorage.storageclass.storage.k8s.io/requests.storage": "0",
 		}
-	} else {
+	default:
 		resouces["hard"] = ConvertToMapString(quota.Status.Total.Hard)
 		resouces["used"] = ConvertToMapString(quota.Status.Total.Used)
+
 	}
 
 	data = map[string]interface{}{
@@ -349,7 +361,7 @@ func (s *Synchronizer) GetQuota(workspace string, cluster string) map[string]int
 		"data":   data,
 	}
 
-	return message
+	return message, nil
 }
 
 func (s *Synchronizer) SendMessage(message map[string]interface{}) error {
